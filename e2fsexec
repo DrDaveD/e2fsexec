@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# Execute fuse2fs inside a user namespace
+# Written by Dave Dykstra 6/16/22, based on cvmfsexec
+# 
+VERSION=0.1
+if [ "$3" != "--" ]; then
+    echo "e2fsexec version $VERSION" >&2
+    echo "Usage: e2fsexec e2fsimage mountpoint -- [command]" >&2
+    exit 1
+fi
+set -e
+FIFODIR=$(mktemp -d)
+trap "rm -rf $FIFODIR" 0
+mkfifo $FIFODIR/1 $FIFODIR/2
+IMG=$1
+MNT=$2
+shift 3
+exec {STDINCOPYFD}<&0
+export STDINCOPYFD
+unshare -rmpf /bin/bash /dev/stdin "${@:-/bin/bash}" <<!EOF-1!
+    set -e
+    mount -t proc proc /proc
+    fuse2fs "$IMG" "$MNT"
+    (
+        read CHILDPID
+        : \$CHILDPID
+        echo "\$(awk '{print \$2; exit}' /proc/self/gid_map) 0 1" >/proc/\$CHILDPID/gid_map
+        echo "\$(awk '{print \$2; exit}' /proc/self/uid_map) 0 1" >/proc/\$CHILDPID/uid_map
+        echo >$FIFODIR/2
+    ) <$FIFODIR/1 &
+    unshare -U /bin/bash /dev/stdin "\$@" <<!EOF-2!
+        set -e
+        echo \\\$$ >$FIFODIR/1
+        read <$FIFODIR/2
+        rm -rf $FIFODIR
+        export -n STDINCOPYFD
+        exec "\\\$@" <&$STDINCOPYFD {STDINCOPYFD}<&-
+!EOF-2!
+!EOF-1!
